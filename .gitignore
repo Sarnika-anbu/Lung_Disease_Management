@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Data — raw and processed (too large for GitHub)
+data/raw/
+data/processed/
+
+# Model checkpoints (large binary files)
+checkpoints/*.pth
+checkpoints/*.pt
+
+# Outputs (generated plots)
+outputs/*.png
+outputs/*.jpg
+
+# Jupyter
+.ipynb_checkpoints/
+.hypothesis/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+*.env
+~/.kaggle/
+
+# Keep these directories tracked (with .gitkeep)
+!data/.gitkeep
+!checkpoints/.gitkeep
+!outputs/.gitkeep

@@ -1,0 +1,198 @@
+# Implementation Plan: Personalized Lung Disease Management System
+
+- [x] 1. Repository structure, configuration, and shared types
+  - Create top-level directories: `data/`, `src/data/`, `src/models/`, `src/training/`, `src/explainability/`, `src/management/`, `src/api/`, `app/`, `notebooks/`, `tests/`, `checkpoints/`, `outputs/`
+  - Create `__init__.py` files in every package directory under `src/`
+  - Create `src/config.py` with the `Config` dataclass containing all preprocessing, training, and path constants using only `pathlib.Path` values — no hardcoded strings anywhere else
+  - Create `src/models/types.py` with `DiseaseClass`, `RiskTier`, `SmokingStatus`, `RecordingLocation` enums and the `ModelPrediction`, `RiskResult`, `ProgressionForecast`, `Recommendation`, `EncounterData` dataclasses
+  - Pin all package versions in `requirements.txt` at project root
+  - Create `Dockerfile` at project root that builds and runs `uvicorn src.api.main:app`
+  - _Requirements: 16.2, 16.3, 17.1, 17.2, 17.3_
+
+- [x] 2. Dataset download pipeline (`src/data/download.py`)
+  - [x] 2.1 Implement `download_datasets()`: read `KAGGLE_USERNAME`/`KAGGLE_KEY` env vars or fall back to `~/.kaggle/kaggle.json`; print descriptive error to stderr and exit non-zero on missing/invalid credentials
+    - _Requirements: 1.1, 1.2, 1.3, 1.4_
+  - [x] 2.2 Add per-dataset skip logic: check whether the target directory is non-empty; if so, print a skip message to stdout and skip that dataset independently
+    - _Requirements: 1.5_
+  - [x] 2.3 Add archive size validation: after download, verify the archive is at least 1 byte; if 0 bytes or absent, print error to stderr and exit non-zero without extracting
+    - _Requirements: 1.6_
+  - [x] 2.4 Add extraction step: extract verified archive to `data/raw/icbhi/` or `data/raw/arashnic/`; on network error or non-200 HTTP response, print dataset name and failure reason to stderr and exit non-zero
+    - _Requirements: 1.7, 1.8_
+  - [x] 2.5 Write unit tests for `download_datasets()` in `tests/test_download.py`: test credential loading from env vars and from `~/.kaggle/kaggle.json`; test skip logic when target directory is non-empty; test exit-non-zero on missing credentials, 0-byte archive, and network error
+    - _Requirements: 1.3, 1.4, 1.5, 1.6, 1.8_
+
+- [x] 3. Annotation parsing and label mapping (`src/data/preprocess.py` — parsing section)
+  - [x] 3.1 Implement `parse_icbhi_annotations(data_dir: Path) -> pd.DataFrame`: parse annotation CSVs extracting start_time, end_time, crackle_label, wheeze_label, patient_id, recording_id; cross-reference `ICBHI_diagnosis.txt`; log warning to stderr and exclude segments for unmatched patient_id; log warning and skip malformed rows (with file name and row number) without halting
+    - _Requirements: 2.1, 2.2, 2.6_
+  - [x] 3.2 Implement `map_label(raw_label: str) -> Optional[DiseaseClass]`: map raw diagnosis strings to one of the seven DiseaseClass values; return `None` and log an unrecognised-label warning to stderr for unknown labels
+    - _Requirements: 2.3, 2.4_
+  - [x] 3.3 Implement `save_metadata(df: pd.DataFrame, output_path: Path) -> None`: write `data/processed/metadata.csv`; record `null` for any missing age, sex, BMI, smoking_status, or recording_location field
+    - _Requirements: 2.5_
+  - [x] 3.4 Write property test for annotation parsing round-trip integrity (Property 1) in `tests/test_preprocess.py`: use `st.from_regex` to generate valid CSV rows; assert parsed output values exactly match source values; `@settings(max_examples=100)`
+    - _Requirements: 2.1_
+  - [x] 3.5 Write property test for label mapping completeness (Property 2) in `tests/test_preprocess.py`: use `st.sampled_from` for known ICBHI vocabulary (assert valid DiseaseClass returned) and `st.text()` for unknown strings (assert None returned); `@settings(max_examples=100)`
+    - _Requirements: 2.3, 2.4_
+  - [x] 3.6 Write property test for null metadata substitution completeness (Property 3) in `tests/test_preprocess.py`: use `st.fixed_dictionaries` with optional fields set to None; assert output row records null for every missing field and correct value for every present field; `@settings(max_examples=100)`
+    - _Requirements: 2.5_
+  - [x] 3.7 Write unit tests for annotation parsing: test unmatched patient_id warning and segment exclusion; test malformed row skipping with correct file name and row number in warning
+    - _Requirements: 2.2, 2.6_
+
+- [x] 4. Audio preprocessing pipeline (`src/data/preprocess.py` — signal processing section)
+  - [x] 4.1 Implement `resample_audio(audio, orig_sr, config) -> np.ndarray`: resample to exactly 4000 Hz for any input sample rate
+    - _Requirements: 3.1_
+  - [x] 4.2 Implement bandpass filter (50–2000 Hz) and spectral gating with default threshold 0.5 (range 0.0–1.0)
+    - _Requirements: 3.2, 3.3_
+  - [x] 4.3 Implement segmentation: 5-second sliding window with 50% overlap; zero-pad trailing segments and any recording shorter than 5 s to exactly 20,000 samples
+    - _Requirements: 3.4_
+  - [x] 4.4 Implement `preprocess_audio(audio_path: Path, config: Config) -> np.ndarray`: chain resample → bandpass → noise gate → segment; compute 128-bin log-mel spectrogram (n_fft=1024, hop_length=128); compute delta and delta-delta channels; zero-pad or truncate time axis to 216 frames; return tensor shape (3, 128, 216) as float32
+    - _Requirements: 3.5, 3.6, 3.7_
+  - [x] 4.5 Write property test for resampling invariant (Property 4): use `st.integers(min_value=4000, max_value=48000)` for input sample rate; assert output sample rate is exactly 4000 Hz; `@settings(max_examples=100)`
+    - _Requirements: 3.1_
+  - [x] 4.6 Write property test for bandpass filter frequency invariant (Property 5): generate pure sinusoids; assert passband signals preserved (output power > input × 0.5) and stopband signals attenuated (output power < input × 0.1); `@settings(max_examples=100)`
+    - _Requirements: 3.2_
+  - [x] 4.7 Write property test for segmentation uniformity (Property 6): use `st.integers(min_value=1)` for audio length; assert every output segment has exactly 20,000 samples; assert recordings shorter than 5 s produce exactly one zero-padded segment; `@settings(max_examples=100)`
+    - _Requirements: 3.4_
+  - [x] 4.8 Write property test for spectrogram output shape invariant (Property 7): use float arrays of exactly 20,000 samples; assert output shape is exactly (3, 128, 216); `@settings(max_examples=100)`
+    - _Requirements: 3.5, 3.6_
+
+- [x] 5. Patient-independent data split (`src/data/preprocess.py` — split section)
+  - [x] 5.1 Implement `split_dataset(df: pd.DataFrame, split_def: Path) -> Tuple[pd.DataFrame, pd.DataFrame]`: apply official ICBHI patient-level split; assert intersection of train and test patient IDs is empty (raise AssertionError listing overlapping IDs if not); log warning and exclude patients absent from split definition; write `data/processed/splits/train.csv` and `data/processed/splits/test.csv` with columns patient_id, recording_id, segment_id, spectrogram_path, disease_class
+    - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5_
+  - [x] 5.2 Write property test for patient-independent split no-overlap (Property 8): use `st.sets` of patient IDs; assert intersection of train and test ID sets is always empty; assert AssertionError raised when overlap is injected; `@settings(max_examples=100)`
+    - _Requirements: 4.1, 4.2, 15.3_
+  - [x] 5.3 Write property test for split CSV column schema (Property 9): use mock dataframes with `st.data`; assert every produced CSV contains exactly the five required columns; `@settings(max_examples=100)`
+    - _Requirements: 4.5_
+
+- [x] 6. CBAM attention module (`src/models/cbam.py`)
+  - Implement `CBAM(nn.Module)` with `__init__(self, channels: int, reduction_ratio: int = 16)` and `forward(self, x: Tensor) -> Tensor`: apply channel attention (squeeze-and-excitation) followed by spatial attention; include Google-style docstrings and type hints on all public methods
+  - _Requirements: 5.3, 5.7_
+
+- [ ] 7. Core model architecture (`src/models/model.py`)
+  - [x] 7.1 Implement metadata MLP branch (input_dim → 64 → 32 → 16 with ReLU); zero-fill null/NaN metadata fields before passing to the MLP; include docstrings and type hints
+    - _Requirements: 5.4, 5.7_
+  - [x] 7.2 Implement `LungDiseaseModel(nn.Module)`: load EfficientNetV2B0 with ImageNet weights; insert CBAM after the final convolutional block before global average pooling; replace the classifier head with a 2-layer fusion head (concat_dim → 128 → 7 + softmax); validate input channel count (raise descriptive error if not 3); implement `forward` and `predict_with_uncertainty` (20 MC Dropout passes returning mean and std vectors of length 7); include docstrings and type hints
+    - _Requirements: 5.1, 5.2, 5.3, 5.5, 5.6, 5.7_
+  - [x] 7.3 Write property test for model input channel validation (Property 10): use `st.integers(min_value=1, max_value=10)` for channel count; assert descriptive error raised for any value ≠ 3; assert no error for channel count = 3; `@settings(max_examples=100)`
+    - _Requirements: 5.1_
+  - [x] 7.4 Write property test for metadata null zero-fill (Property 11): use `st.lists` of nullable floats; assert all NaN/null replaced with 0.0 before MLP processing; assert MLP output vector has length 16; `@settings(max_examples=100)`
+    - _Requirements: 5.4_
+  - [x] 7.5 Write property test for softmax output invariant (Property 12): use random (spectrogram, metadata) tensors; assert returned vector length is 7, all values in [0.0, 1.0], sum within 1e-5 of 1.0; `@settings(max_examples=100)`
+    - _Requirements: 5.5_
+  - [x] 7.6 Write property test for MC Dropout output shape and non-negativity (Property 13): use random valid inputs; assert both returned vectors have length 7; assert all std values ≥ 0; assert mean vector satisfies softmax invariant; `@settings(max_examples=100)`
+    - _Requirements: 5.6_
+  - [x] 7.7 Write unit tests for model architecture: test CBAM is inserted after last conv block; test classifier head replacement (original EfficientNetV2B0 head absent)
+    - _Requirements: 5.2, 5.3_
+
+- [x] 8. Training infrastructure (`src/training/train.py`)
+  - [x] 8.1 Implement `FocalLoss`: gamma=2, alpha from inverse class frequency, label_smoothing=0.1
+    - _Requirements: 6.1_
+  - [x] 8.2 Implement `WeightedRandomSampler` weight computation: weight_i = 1.0 / count_i; assign higher weights to minority classes; wire into the training DataLoader
+    - _Requirements: 6.2_
+  - [x] 8.3 Implement `LungSoundDataset` with SpecAugment (time_mask_param=80, freq_mask_param=30, num_masks=2) applied in `__getitem__` only when in training mode; implement Mixup augmentation (alpha=0.4) on minority-class pairs in the training loop only; ensure neither augmentation is applied during validation or evaluation
+    - _Requirements: 6.3, 6.4_
+  - [x] 8.4 Implement `Trainer` class: `train_stage1()` (50 epochs, AdamW lr=1e-4 / weight_decay=1e-2, CosineAnnealingLR T_max=50, full model, print epoch/train-loss/val-loss/val-ICBHI-score each epoch); `freeze_backbone()` (set all backbone parameters requires_grad=False; raise error if any remain trainable); `train_stage2()` (15 epochs, class-balanced subset capped at minority-class count, AdamW lr=1e-4 / weight_decay=1e-2); `_save_best_checkpoint()` (overwrite `checkpoints/best.pth` only when current ICBHI score exceeds previous best)
+    - _Requirements: 6.5, 6.6, 6.7, 6.8, 6.9, 6.10, 6.11_
+  - [x] 8.5 Write property test for sampler weight correctness (Property 14): use `st.dictionaries` of class→count; assert weight_i = 1.0/count_i; assert minority-class weights strictly higher than majority-class weights; `@settings(max_examples=100)`
+    - _Requirements: 6.2_
+  - [x] 8.6 Write property test for augmentation training-only invariant (Property 15): fixed spectrogram input; assert deterministic output in eval mode; assert non-zero probability of different output in training mode on repeated calls; `@settings(max_examples=100)`
+    - _Requirements: 6.3, 6.4_
+  - [x] 8.7 Write property test for backbone freeze completeness (Property 16): after calling `freeze_backbone()`, assert every backbone parameter has requires_grad=False; assert error raised if any parameter remains trainable; `@settings(max_examples=100)`
+    - _Requirements: 6.8_
+  - [x] 8.8 Write property test for checkpoint save monotonicity (Property 17): use `st.floats(min_value=0.0, max_value=1.0)` for score pairs; assert checkpoint overwritten iff current_score > previous_best; `@settings(max_examples=100)`
+    - _Requirements: 6.10_
+  - [x] 8.9 Write unit tests for training configuration: test optimizer is AdamW with correct lr and weight_decay; test scheduler is CosineAnnealingLR with T_max=50 scoped to Stage 1; test focal loss parameters (gamma=2, label smoothing=0.1)
+    - _Requirements: 6.1, 6.5, 6.6_
+
+- [x] 9. Model evaluation (`src/training/evaluate.py`)
+  - [x] 9.1 Implement `Evaluator` class: `compute_icbhi_score() -> float` using formula (sensitivity + specificity) / 2; `compute_metrics() -> EvaluationReport` computing macro-F1, per-class precision/recall/F1, per-class ROC-AUC, and ECE; `plot_confusion_matrix(save_path)` saving heatmap to `outputs/confusion_matrix.png`; `plot_reliability_diagram(save_path)` saving to `outputs/reliability_diagram.png`; print ICBHI score, macro-F1, and per-class table to stdout; use only the patient-independent test split
+    - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 7.8_
+  - [x] 9.2 Write property test for ICBHI score formula correctness (Property 18): use `st.integers(min_value=0)` for TP, TN, FP, FN; assert result equals (TP/(TP+FN) + TN/(TN+FP)) / 2 within floating-point tolerance; `@settings(max_examples=100)`
+    - _Requirements: 7.1_
+  - [x] 9.3 Write property test for evaluation full-class coverage (Property 19): use `st.lists` of (label, prediction) pairs; assert per-class metrics output contains exactly seven entries for both precision/recall/F1 and ROC-AUC; `@settings(max_examples=100)`
+    - _Requirements: 7.3, 7.4_
+
+- [x] 10. Grad-CAM explainability module (`src/explainability/explainer.py`)
+  - [x] 10.1 Implement `GradCAMExplainer`: use `pytorch-grad-cam` targeting the last convolutional layer of EfficientNetV2B0; implement `explain(spectrogram: Tensor) -> str` returning a base64-encoded annotated PNG string; implement `_annotate_heatmap` applying frequency-range annotation rules (wheeze 100–1000 Hz, crackle 200–2000 Hz, low-freq < 100 Hz — most prominent pattern only; no annotation if no pattern detected); the full explain call must complete within 3 s combined with model inference
+    - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 8.8_
+  - [x] 10.2 Write property test for Grad-CAM annotation correctness and exclusivity (Property 20): use synthetic heatmaps at known frequency ranges; assert each highlighted region receives at most one annotation; assert correct label per frequency range; assert no annotation when no defined pattern detected; `@settings(max_examples=100)`
+    - _Requirements: 8.3, 8.4, 8.5, 8.6_
+  - [x] 10.3 Write unit tests for Grad-CAM: test output is a valid base64-encoded PNG string; test annotation applied only when a defined frequency pattern is the most prominent
+    - _Requirements: 8.1, 8.7_
+
+- [x] 11. Risk Scorer (`src/management/risk_scorer.py`)
+  - [x] 11.1 Implement `RiskScorer.score()`: accept disease_class, age, pack_years, bmi, confidence, uncertainty; apply rule-based composite scoring combining all factors; map 0–33 → Low, 34–66 → Medium, 67–100 → High; return `RiskResult(tier, score)`; include type hints and docstrings
+    - _Requirements: 9.1, 9.2, 9.3, 9.4_
+  - [x] 11.2 Write property test for risk score range and tier validity (Property 21): use `st.floats` for all numeric inputs and `st.sampled_from(DiseaseClass)` for disease class; assert score in [0, 100] and tier in {Low, Medium, High}; `@settings(max_examples=100)`
+    - _Requirements: 9.2_
+  - [x] 11.3 Write property test for risk score monotonicity (Property 22): hold all factors constant; vary one risk-elevating factor (pack_years, age, lower confidence, higher uncertainty); assert score does not decrease; `@settings(max_examples=100)`
+    - _Requirements: 9.3_
+
+- [x] 12. Recommendation Engine (`src/management/recommendations.py`)
+  - [x] 12.1 Implement `RecommendationEngine.get_recommendations(disease_class, risk_tier) -> List[Recommendation]`: populate a lookup table for all 21 (DiseaseClass × RiskTier) pairs; COPD entries cite "GOLD 2024" in source; Asthma entries cite "GINA" in source; every returned list includes a spirometry referral recommendation; every Recommendation object has non-null, non-empty icon, text, sub_text, source fields
+    - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5_
+  - [x] 12.2 Write property test for recommendation coverage and schema validity (Property 23): exhaustively enumerate all 21 (DiseaseClass × RiskTier) pairs; assert each returns a non-empty list where every recommendation has non-null, non-empty values for all four fields; `@settings(max_examples=100)`
+    - _Requirements: 10.1, 10.4_
+  - [x] 12.3 Write property test for COPD GOLD 2024 citation (Property 24): use `st.sampled_from(RiskTier)` for all three tiers; assert at least one recommendation's source contains "GOLD 2024"; `@settings(max_examples=100)`
+    - _Requirements: 10.2_
+  - [x] 12.4 Write property test for Asthma GINA citation (Property 25): use `st.sampled_from(RiskTier)` for all three tiers; assert at least one recommendation's source contains "GINA"; `@settings(max_examples=100)`
+    - _Requirements: 10.3_
+  - [x] 12.5 Write property test for spirometry referral always present (Property 26): use `st.sampled_from` for all 21 DiseaseClass × RiskTier combinations; assert at least one recommendation's text or sub_text contains "spirometry"; `@settings(max_examples=100)`
+    - _Requirements: 10.5_
+
+- [ ] 13. Progression Module (`src/management/progression.py`)
+  - [x] 13.1 Implement `ProgressionModule.get_trajectory(disease_class, risk_tier, smoking_status) -> ProgressionForecast`: encode trajectory probabilities as a static lookup table (GOLD natural-history values); return ProgressionForecast with month_3, month_6, month_12 dicts of float values in [0.0, 1.0]; zero is a valid probability; no runtime model inference
+    - _Requirements: 11.1, 11.2, 11.3_
+  - [x] 13.2 Write property test for progression forecast schema and value range (Property 27): use `st.sampled_from` for all valid 3-factor input combinations; assert forecast contains exactly keys month_3, month_6, month_12; assert every probability value is in [0.0, 1.0]; `@settings(max_examples=100)`
+    - _Requirements: 11.2_
+  - [x] 13.3 Write property test for progression forecast determinism (Property 28): call `get_trajectory` twice with identical arguments; assert both calls return identical results; `@settings(max_examples=100)`
+    - _Requirements: 11.3_
+
+- [ ] 14. Report Generator (`src/management/report_generator.py`)
+  - [x] 14.1 Implement `ReportGenerator.generate(encounter: EncounterData) -> bytes` using reportlab==4.0: produce a PDF with exactly 9 sections in order — (1) Patient header with risk badge, (2) Primary diagnosis with confidence bar, (3) Class probability distribution bar chart, (4) Grad-CAM spectrogram image, (5) Risk stratification metrics grid, (6) Progression timeline, (7) Management recommendations list, (8) Model quality metadata, (9) Disclaimer footer containing model ICBHI score and training dataset name; return raw PDF bytes
+    - _Requirements: 12.1, 12.2, 12.3_
+  - [x] 14.2 Write property test for PDF report structure invariant (Property 29): use `st.builds(EncounterData)` with randomised field values; assert the generated PDF contains markers for all 9 sections in the correct order; `@settings(max_examples=100)`
+    - _Requirements: 12.1_
+  - [x] 14.3 Write property test for disclaimer footer content (Property 30): use `st.builds(EncounterData)` with varying ICBHI scores and dataset names; assert PDF section 9 text contains both the ICBHI score and the dataset name; `@settings(max_examples=100)`
+    - _Requirements: 12.2_
+  - [x] 14.4 Write unit tests for Report Generator: test HTTP 500 returned (via API mock) when PDF generation fails due to missing data; test section ordering is preserved
+    - _Requirements: 12.4, 12.5_
+
+- [ ] 15. FastAPI backend (`src/api/`)
+  - [x] 15.1 Create `src/api/schemas.py`: define PredictRequest, PredictResponse, ReportRequest, ExplainResponse, HealthResponse Pydantic models with all fields and types from the design; validation failures must trigger HTTP 422
+    - _Requirements: 13.1, 13.2, 13.3, 13.4, 13.5, 13.6_
+  - [x] 15.2 Implement `POST /predict` endpoint in `src/api/main.py`: accept multipart/form-data (audio_file, age, sex, bmi, smoking_pack_years, recording_location); validate with Pydantic; run preprocessing → MC Dropout inference → risk scoring; return PredictResponse JSON; return HTTP 500 with descriptive body on internal model failure
+    - _Requirements: 13.1, 13.6, 13.7_
+  - [x] 15.3 Implement `GET /explain/{recording_id}` endpoint: run GradCAMExplainer.explain(); return ExplainResponse JSON with spectrogram_base64 and highlighted_regions
+    - _Requirements: 13.2_
+  - [x] 15.4 Implement `POST /report` endpoint: accept same fields as /predict plus patient_name and patient_id; run the full inference + explainability + management pipeline; call ReportGenerator.generate(); return PDF as `application/pdf` streaming attachment; return HTTP 500 with no file attachment on PDF generation failure
+    - _Requirements: 13.3, 12.4, 12.5_
+  - [x] 15.5 Implement `GET /health` endpoint: return `{"status": "ok", "model_version": ..., "icbhi_score": ...}` JSON; on model file not found at startup, log critical error and return HTTP 503 on all endpoints
+    - _Requirements: 13.4_
+  - [x] 15.6 Wire `src/api/main.py` startup: load LungDiseaseModel from `checkpoints/best.pth`; instantiate GradCAMExplainer, RiskScorer, RecommendationEngine, ProgressionModule, ReportGenerator; share instances across endpoint handlers via FastAPI dependency injection
+    - _Requirements: 13.8_
+  - [x] 15.7 Write property test for prediction API response schema (Property 31): use `st.builds(PredictRequest)` for valid requests; assert response contains all six required fields; assert confidence in [0.0, 1.0]; assert probabilities contains exactly seven DiseaseClass keys; assert risk_tier in {Low, Medium, High}; `@settings(max_examples=100)`
+    - _Requirements: 13.1_
+  - [x] 15.8 Write property test for input validation rejects invalid requests (Property 32): use invalid types, missing fields, out-of-range numerics, and unrecognised enum values; assert HTTP 422 with descriptive body identifying the invalid field(s); `@settings(max_examples=100)`
+    - _Requirements: 13.5, 13.6_
+  - [x] 15.9 Write unit tests for API: test HTTP 500 returned on internal model failure with descriptive body; test PDF attachment has correct `Content-Disposition: attachment` header; test /health returns expected JSON schema
+    - _Requirements: 13.4, 13.7, 12.4_
+
+- [x] 16. Streamlit frontend (`app/streamlit_app.py`)
+  - [x] 16.1 Implement left panel: WAV file uploader (`st.file_uploader`) and patient metadata form (name, ID, age, sex, BMI, smoking pack-years, recording location); wire Submit button to call POST /predict then POST /report against the FastAPI backend
+    - _Requirements: 14.1, 14.2_
+  - [x] 16.2 Implement right panel: diagnosis badge, confidence bar, Altair probability chart, Grad-CAM annotated spectrogram image, risk metrics display, recommendations list; wire Download button to deliver the PDF report to the user's browser
+    - _Requirements: 14.3, 14.4_
+  - [x] 16.3 Write unit tests for Streamlit frontend: test the form renders all required fields; test Submit button triggers both /predict and /report calls
+    - _Requirements: 14.1, 14.2_
+
+- [x] 17. README and documentation
+  - Write `README.md` containing: setup instructions, Kaggle API configuration steps, commands to run the data pipeline, command to run training, command to run evaluation, command to start the API, and command to start the frontend
+  - _Requirements: 16.4_
+
+- [ ] 18. Integration tests and final wiring
+  - [x] 18.1 Add integration test for end-to-end inference timing in `tests/test_integration.py`: upload a WAV file through the full prediction + Grad-CAM pipeline; assert total time < 3 s
+    - _Requirements: 8.8, 15.2_
+  - [x] 18.2 Add integration test for API startup: start the uvicorn server programmatically; assert all four endpoints (/predict, /explain/{id}, /report, /health) return expected status codes
+    - _Requirements: 13.8_
+  - [x] 18.3 Add integration test for evaluation output files: run Evaluator against a mock test loader; assert `outputs/confusion_matrix.png` and `outputs/reliability_diagram.png` are created
+    - _Requirements: 7.5, 7.6_

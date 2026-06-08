@@ -1,0 +1,2 @@
+{"specId": "a7c18046-836b-4bcd-8213-3f35dfc617a2", "workflowType": "requirements-first", "specType": "feature"}
+Training is designed for a GPU with ~15 GB VRAM (e.g. Google Colab T4). On CPU it will be very slow — Stage 1 alone (50 epochs × ~1000 batches) would take many hours. Running it on Colab is the recommended path if you don't have a local GPU.
