@@ -37,7 +37,8 @@ _ANNOTATION_COLS = ["start_time", "end_time", "crackle_label", "wheeze_label"]
 
 # Pattern that extracts patient_id and recording_index from ICBHI filenames.
 # Filename format: {patient_id}_{recording_index}_{...}.txt
-_FILENAME_RE = re.compile(r"^(\d+)_(\d+)_")
+# recording_index can be alphanumeric (e.g. 1b1, 2b4)
+_FILENAME_RE = re.compile(r"^(\d+)_([A-Za-z0-9]+)_")
 
 # Mapping from raw ICBHI diagnosis strings to DiseaseClass enum values.
 _LABEL_MAP: dict[str, DiseaseClass] = {
@@ -168,13 +169,15 @@ def parse_icbhi_annotations(data_dir: Path) -> pd.DataFrame:
 
 
 def _load_diagnosis_map(diagnosis_path: Path) -> dict[str, str]:
-    """Load ``ICBHI_diagnosis.txt`` into a ``{patient_id: diagnosis}`` mapping.
+    """Load ``ICBHI_diagnosis.txt`` or ``demographic_info.txt`` into a ``{patient_id: diagnosis}`` mapping.
 
-    The file is assumed to be tab- or whitespace-separated with columns
-    ``patient_id`` and ``diagnosis`` (no header).
+    Handles two formats:
+    1. Simple 2-column: ``patient_id  diagnosis`` (no header, whitespace-separated)
+    2. ICBHI demographic_info.txt: tab-separated with header row containing
+       columns like ``patient_id``, ``age``, ``sex``, ``adult_BMI``, ``diagnosis``
 
     Args:
-        diagnosis_path: Absolute path to ``ICBHI_diagnosis.txt``.
+        diagnosis_path: Absolute path to the diagnosis/demographic file.
 
     Returns:
         Dictionary mapping patient ID strings to diagnosis strings.
@@ -188,12 +191,62 @@ def _load_diagnosis_map(diagnosis_path: Path) -> dict[str, str]:
         return {}
 
     diagnosis_map: dict[str, str] = {}
-    with diagnosis_path.open(encoding="utf-8") as fh:
-        for line in fh:
-            parts = line.strip().split()
-            if len(parts) >= 2:
-                pid, diag = parts[0], parts[1]
-                diagnosis_map[pid] = diag
+
+    try:
+        with diagnosis_path.open(encoding="utf-8") as fh:
+            first_line = fh.readline().strip()
+
+        # Check if it has a header row (contains non-numeric first token)
+        first_parts = first_line.split()
+        has_header = first_parts and not first_parts[0].isdigit()
+
+        if has_header:
+            # Parse as CSV/TSV with header
+            import pandas as pd_diag
+            try:
+                df_diag = pd_diag.read_csv(
+                    diagnosis_path, sep="\t", engine="python"
+                )
+            except Exception:
+                df_diag = pd_diag.read_csv(
+                    diagnosis_path, sep=r"\s+", engine="python"
+                )
+
+            # Normalise column names to lowercase
+            df_diag.columns = [c.strip().lower() for c in df_diag.columns]
+
+            # Find patient_id and diagnosis columns
+            pid_col = next(
+                (c for c in df_diag.columns if "patient" in c or c == "id"),
+                df_diag.columns[0],
+            )
+            diag_col = next(
+                (c for c in df_diag.columns if "diagnosis" in c or "disease" in c),
+                None,
+            )
+
+            if diag_col is None:
+                # Last column is often diagnosis
+                diag_col = df_diag.columns[-1]
+
+            for _, row in df_diag.iterrows():
+                pid = str(row[pid_col]).strip()
+                diag = str(row[diag_col]).strip()
+                if pid and diag and diag.lower() != "nan":
+                    diagnosis_map[pid] = diag
+        else:
+            # Simple 2-column format: patient_id  diagnosis
+            with diagnosis_path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        pid, diag = parts[0], parts[1]
+                        diagnosis_map[pid] = diag
+
+    except Exception as exc:
+        logger.warning("Error parsing diagnosis file '%s': %s", diagnosis_path, exc)
+
+    logger.info("Loaded %d patient diagnoses from %s", len(diagnosis_map), diagnosis_path.name)
     return diagnosis_map
 
 
