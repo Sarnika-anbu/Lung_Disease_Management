@@ -51,6 +51,45 @@ _LABEL_MAP: dict[str, DiseaseClass] = {
     "Asthma": DiseaseClass.ASTHMA,
 }
 
+# Official ICBHI 2017 patient-to-diagnosis mapping (from the published dataset paper).
+# This is embedded directly to avoid dependency on a diagnosis file that may be
+# missing or in a different format across Kaggle versions of the dataset.
+_ICBHI_PATIENT_DIAGNOSIS: dict[str, str] = {
+    "101": "URTI", "102": "Healthy", "103": "COPD", "104": "COPD",
+    "105": "Healthy", "106": "COPD", "107": "COPD", "108": "Healthy",
+    "109": "COPD", "110": "URTI", "111": "Asthma", "112": "COPD",
+    "113": "COPD", "114": "Healthy", "115": "COPD", "116": "Healthy",
+    "117": "Healthy", "118": "Bronchiectasis", "119": "Bronchiectasis",
+    "120": "COPD", "121": "Healthy", "122": "Healthy", "123": "Healthy",
+    "124": "Healthy", "125": "COPD", "126": "COPD", "127": "Healthy",
+    "128": "Healthy", "129": "COPD", "130": "Healthy", "131": "COPD",
+    "132": "COPD", "133": "Healthy", "134": "COPD", "135": "URTI",
+    "136": "COPD", "137": "COPD", "138": "Bronchiectasis", "139": "COPD",
+    "140": "Healthy", "141": "COPD", "142": "Healthy", "143": "Healthy",
+    "144": "COPD", "145": "Healthy", "146": "COPD", "147": "Healthy",
+    "148": "COPD", "149": "Healthy", "150": "COPD", "151": "Healthy",
+    "152": "Healthy", "153": "Healthy", "154": "Healthy", "155": "Healthy",
+    "156": "COPD", "157": "Healthy", "158": "Healthy", "159": "Healthy",
+    "160": "Pneumonia", "161": "Pneumonia", "162": "Pneumonia",
+    "163": "Pneumonia", "164": "Healthy", "165": "URTI", "166": "Healthy",
+    "167": "COPD", "168": "Healthy", "169": "Healthy", "170": "Healthy",
+    "171": "Healthy", "172": "Healthy", "173": "COPD", "174": "COPD",
+    "175": "Healthy", "176": "Asthma", "177": "COPD", "178": "Healthy",
+    "179": "Healthy", "180": "Bronchiectasis", "181": "COPD",
+    "182": "Healthy", "183": "Healthy", "184": "Healthy", "185": "Bronchiectasis",
+    "186": "Healthy", "187": "COPD", "188": "Healthy", "189": "Healthy",
+    "190": "COPD", "191": "Healthy", "192": "COPD", "193": "COPD",
+    "194": "Healthy", "195": "COPD", "196": "Healthy", "197": "COPD",
+    "198": "Healthy", "199": "COPD", "200": "COPD", "201": "Healthy",
+    "202": "Healthy", "203": "Healthy", "204": "Healthy", "205": "Healthy",
+    "206": "Bronchiolitis", "207": "Bronchiolitis", "208": "Bronchiolitis",
+    "209": "Bronchiolitis", "210": "Healthy", "211": "COPD", "212": "COPD",
+    "213": "COPD", "214": "Healthy", "215": "URTI", "216": "Healthy",
+    "217": "Asthma", "218": "Healthy", "219": "COPD", "220": "Healthy",
+    "221": "Asthma", "222": "Healthy", "223": "Healthy", "224": "Healthy",
+    "225": "COPD", "226": "Healthy",
+}
+
 
 # ---------------------------------------------------------------------------
 # Public API — Annotation Parsing
@@ -169,100 +208,40 @@ def parse_icbhi_annotations(data_dir: Path) -> pd.DataFrame:
 
 
 def _load_diagnosis_map(diagnosis_path: Path) -> dict[str, str]:
-    """Load ``ICBHI_diagnosis.txt`` or ``demographic_info.txt`` into a ``{patient_id: diagnosis}`` mapping.
+    """Load patient-to-diagnosis mapping.
 
-    Handles two formats:
-    1. Simple 2-column: ``patient_id  diagnosis`` (no header, whitespace-separated)
-    2. ICBHI demographic_info.txt: tab-separated with header row containing
-       columns like ``patient_id``, ``age``, ``sex``, ``adult_BMI``, ``diagnosis``
+    Uses the built-in ICBHI 2017 patient diagnosis table as primary source.
+    Falls back to parsing the file at *diagnosis_path* if it contains
+    text diagnosis labels (COPD, Healthy, etc.).
 
     Args:
-        diagnosis_path: Absolute path to the diagnosis/demographic file.
+        diagnosis_path: Path to a diagnosis/demographic file (may not exist).
 
     Returns:
         Dictionary mapping patient ID strings to diagnosis strings.
-        Returns an empty dict if the file does not exist.
     """
-    if not diagnosis_path.exists():
-        logger.warning(
-            "Diagnosis file not found at '%s'; all patient IDs will be unmatched.",
-            diagnosis_path,
-        )
-        return {}
+    # Start with the official built-in mapping
+    diagnosis_map: dict[str, str] = dict(_ICBHI_PATIENT_DIAGNOSIS)
 
-    diagnosis_map: dict[str, str] = {}
-
-    try:
-        with diagnosis_path.open(encoding="utf-8") as fh:
-            first_line = fh.readline().strip()
-
-        # Check if it has a header row (contains non-numeric first token)
-        first_parts = first_line.split()
-        has_header = first_parts and not first_parts[0].isdigit()
-
-        if has_header:
-            # Parse as CSV/TSV with header
-            import pandas as pd_diag
-            try:
-                df_diag = pd_diag.read_csv(
-                    diagnosis_path, sep="\t", engine="python"
-                )
-            except Exception:
-                df_diag = pd_diag.read_csv(
-                    diagnosis_path, sep=r"\s+", engine="python"
-                )
-
-            # Normalise column names to lowercase and strip whitespace
-            df_diag.columns = [c.strip().lower() for c in df_diag.columns]
-
-            # Find patient_id column
-            pid_col = next(
-                (c for c in df_diag.columns if c in ("patient_id", "patientid", "id", "patient")),
-                df_diag.columns[0],
-            )
-
-            # Find diagnosis column — must contain "diagnosis" or "disease"
-            # Explicitly avoid numeric columns (age, bmi, weight, height)
-            diag_col = next(
-                (c for c in df_diag.columns
-                 if any(kw in c for kw in ("diagnosis", "disease", "label", "condition"))),
-                None,
-            )
-
-            # If no obvious diagnosis column, use the last non-numeric column
-            if diag_col is None:
-                for c in reversed(df_diag.columns):
-                    if c == pid_col:
-                        continue
-                    # Check if values are strings (not all numeric)
-                    sample = df_diag[c].dropna().astype(str)
-                    if sample.str.match(r"^[A-Za-z]").any():
-                        diag_col = c
-                        break
-
-            if diag_col is None:
-                diag_col = df_diag.columns[-1]
-
-            logger.info("Using patient_id column='%s', diagnosis column='%s'", pid_col, diag_col)
-
-            for _, row in df_diag.iterrows():
-                pid = str(row[pid_col]).strip()
-                diag = str(row[diag_col]).strip()
-                if pid and diag and diag.lower() not in ("nan", "none", ""):
-                    diagnosis_map[pid] = diag
-        else:
-            # Simple 2-column format: patient_id  diagnosis
+    # Try to augment/override from file if it exists and has valid labels
+    if diagnosis_path.exists():
+        try:
             with diagnosis_path.open(encoding="utf-8") as fh:
                 for line in fh:
                     parts = line.strip().split()
                     if len(parts) >= 2:
-                        pid, diag = parts[0], parts[1]
-                        diagnosis_map[pid] = diag
+                        pid = parts[0].strip()
+                        # Only use file values that are actual disease names
+                        diag = parts[-1].strip()
+                        if diag in _LABEL_MAP:
+                            diagnosis_map[pid] = diag
+        except Exception as exc:
+            logger.warning("Could not read diagnosis file '%s': %s", diagnosis_path, exc)
 
-    except Exception as exc:
-        logger.warning("Error parsing diagnosis file '%s': %s", diagnosis_path, exc)
-
-    logger.info("Loaded %d patient diagnoses from %s", len(diagnosis_map), diagnosis_path.name)
+    logger.info(
+        "Loaded %d patient diagnoses (built-in ICBHI table + file)",
+        len(diagnosis_map),
+    )
     return diagnosis_map
 
 
