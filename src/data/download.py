@@ -47,8 +47,8 @@ def _load_credentials() -> tuple[str, str]:
         SystemExit: If credentials cannot be found or are invalid, prints a
             descriptive message to stderr and exits with status code 1.
     """
-    username = os.environ.get("KAGGLE_USERNAME")
-    key = os.environ.get("KAGGLE_KEY")
+    username = os.environ.get("sarnikaga")
+    key = os.environ.get("KGAT_c10a0caaa784bfb8452210d66440edde")
 
     if username and key:
         return username, key
