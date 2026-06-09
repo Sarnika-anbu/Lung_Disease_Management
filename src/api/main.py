@@ -63,11 +63,17 @@ async def startup_event() -> None:
             _model.load_state_dict(checkpoint["model_state_dict"])
             _model.eval()
             _icbhi_score = float(checkpoint.get("score", 0.0))
-            _explainer = GradCAMExplainer(_model, config)
             _model_loaded = True
             logger.info(
                 "Model loaded from %s (ICBHI=%.4f)", checkpoint_path, _icbhi_score
             )
+            # Explainer is optional — don't fail startup if it errors
+            try:
+                _explainer = GradCAMExplainer(_model, config)
+                logger.info("GradCAM explainer ready")
+            except Exception as exc_exp:  # noqa: BLE001
+                logger.warning("GradCAM explainer failed to load: %s", exc_exp)
+                _explainer = None
         except Exception as exc:  # noqa: BLE001
             logger.critical("Failed to load model: %s", exc)
             _model_loaded = False
