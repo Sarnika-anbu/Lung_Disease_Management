@@ -487,21 +487,66 @@ class Evaluator:
 
 if __name__ == "__main__":  # pragma: no cover
     import sys
+    import pandas as pd
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
 
     config = Config()
 
     print("Lung Disease Management System — Model Evaluation")
     print("=" * 55)
-    print("No test_loader provided in __main__ context.")
-    print("To evaluate a model, instantiate Evaluator programmatically.")
+
+    # Check for checkpoint
+    checkpoint_path = config.checkpoints_dir / "best.pth"
+    if not checkpoint_path.exists():
+        print(f"ERROR: No checkpoint found at {checkpoint_path}")
+        print("Run training first: python src/training/train.py")
+        sys.exit(1)
+
+    # Check for test split
+    test_csv = config.splits_dir / "test.csv"
+    if not test_csv.exists():
+        print(f"ERROR: Test split not found at {test_csv}")
+        print("Run preprocessing first: python src/data/preprocess.py")
+        sys.exit(1)
+
+    # Load model
+    from src.models.model import LungDiseaseModel
+    from src.training.train import LungSoundDataset, _METADATA_DIM
+
+    checkpoint = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+    model = LungDiseaseModel(metadata_input_dim=_METADATA_DIM)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+    print(f"Model loaded (ICBHI score at training: {checkpoint.get('score', 'N/A'):.4f})")
+
+    # Build test loader
+    test_df = pd.read_csv(test_csv)
+    test_dataset = LungSoundDataset(test_df, config, training=False)
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=0)
+
+    # Run evaluation
+    evaluator = Evaluator(model, test_loader, config)
+    report = evaluator.compute_metrics()
+
+    # Print results
+    print(f"\nICBHI Score : {report.icbhi_score:.4f}")
+    print(f"Macro F1    : {report.macro_f1:.4f}")
+    print(f"ECE         : {report.ece:.4f}")
     print()
-    print("Example output format:")
-    print(f"  ICBHI Score : <float>")
-    print(f"  Macro F1    : <float>")
-    print()
-    print("  Per-class metrics:")
     header = f"  {'Class':<18} {'Precision':>10} {'Recall':>10} {'F1':>10} {'ROC-AUC':>10}"
     print(header)
     print("  " + "-" * (len(header) - 2))
     for cls in _DISEASE_CLASSES:
-        print(f"  {cls:<18} {'N/A':>10} {'N/A':>10} {'N/A':>10} {'N/A':>10}")
+        p = report.per_class_precision.get(cls, 0.0)
+        r = report.per_class_recall.get(cls, 0.0)
+        f = report.per_class_f1.get(cls, 0.0)
+        a = report.per_class_roc_auc.get(cls, 0.0)
+        print(f"  {cls:<18} {p:>10.4f} {r:>10.4f} {f:>10.4f} {a:>10.4f}")
+
+    # Save plots
+    config.outputs_dir.mkdir(parents=True, exist_ok=True)
+    evaluator.plot_confusion_matrix(config.outputs_dir / "confusion_matrix.png")
+    evaluator.plot_reliability_diagram(config.outputs_dir / "reliability_diagram.png")
+    print(f"\nPlots saved to {config.outputs_dir}/")
+

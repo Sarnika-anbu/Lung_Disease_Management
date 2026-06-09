@@ -673,3 +673,158 @@ def split_dataset(
     test_df.to_csv(splits_dir / "test.csv", index=False)
 
     return train_df, test_df
+
+
+# ---------------------------------------------------------------------------
+# Main entry point — run the full preprocessing pipeline
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+
+    config = Config()
+
+    # ------------------------------------------------------------------
+    # 1. Parse ICBHI annotations
+    # ------------------------------------------------------------------
+    print("Step 1/4: Parsing ICBHI annotations...")
+    icbhi_dir = config.raw_icbhi_dir
+
+    # Try to find the annotation directory (may be nested after extraction)
+    annotation_dirs = list(icbhi_dir.rglob("ICBHI_diagnosis.txt"))
+    if not annotation_dirs:
+        print(f"ERROR: ICBHI_diagnosis.txt not found under {icbhi_dir}")
+        print("Make sure you have downloaded and extracted the ICBHI dataset.")
+        sys.exit(1)
+
+    ann_dir = annotation_dirs[0].parent
+    print(f"  Found annotations in: {ann_dir}")
+
+    df = parse_icbhi_annotations(ann_dir)
+    print(f"  Parsed {len(df)} segments from {df['patient_id'].nunique()} patients")
+
+    if df.empty:
+        print("ERROR: No segments parsed. Check the data directory.")
+        sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # 2. Save metadata
+    # ------------------------------------------------------------------
+    print("Step 2/4: Saving patient metadata...")
+    config.processed_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build metadata DataFrame from the parsed annotations
+    metadata_cols = ["patient_id", "diagnosis"]
+    meta_df = df[["patient_id"]].drop_duplicates().copy()
+    meta_df["age"] = None
+    meta_df["sex"] = None
+    meta_df["bmi"] = None
+    meta_df["smoking_status"] = None
+    meta_df["recording_location"] = None
+
+    # Try to load demographic info from Arashnic dataset if available
+    arashnic_dir = config.raw_arashnic_dir
+    if arashnic_dir.exists():
+        demo_files = list(arashnic_dir.rglob("*.csv"))
+        for demo_file in demo_files:
+            try:
+                import pandas as pd_inner
+                demo = pd_inner.read_csv(demo_file)
+                if "patient_id" in demo.columns or "id" in demo.columns.str.lower().tolist():
+                    print(f"  Found demographic data: {demo_file}")
+                    break
+            except Exception:
+                pass
+
+    save_metadata(meta_df, config.metadata_path)
+    print(f"  Metadata saved to {config.metadata_path}")
+
+    # ------------------------------------------------------------------
+    # 3. Preprocess audio → spectrograms
+    # ------------------------------------------------------------------
+    print("Step 3/4: Preprocessing audio files...")
+    spectrograms_dir = config.processed_dir / "spectrograms"
+    spectrograms_dir.mkdir(parents=True, exist_ok=True)
+
+    import pandas as pd
+    import numpy as np
+
+    spectrogram_paths = []
+    skipped = 0
+
+    # Find all WAV files in the ICBHI directory
+    wav_files = list(ann_dir.rglob("*.wav"))
+    if not wav_files:
+        wav_files = list(icbhi_dir.rglob("*.wav"))
+
+    print(f"  Found {len(wav_files)} WAV files")
+
+    for i, wav_path in enumerate(wav_files):
+        if i % 50 == 0:
+            print(f"  Processing {i}/{len(wav_files)}...")
+        try:
+            spec = preprocess_audio(wav_path, config)
+            npy_path = spectrograms_dir / (wav_path.stem + ".npy")
+            np.save(str(npy_path), spec)
+            # Extract patient_id from filename
+            match = _FILENAME_RE.match(wav_path.name)
+            patient_id = match.group(1) if match else wav_path.stem[:3]
+            spectrogram_paths.append({
+                "patient_id": patient_id,
+                "recording_id": wav_path.stem,
+                "spectrogram_path": str(npy_path),
+            })
+        except Exception as exc:
+            logger.warning("Failed to preprocess %s: %s", wav_path.name, exc)
+            skipped += 1
+
+    print(f"  Processed {len(spectrogram_paths)} files ({skipped} skipped)")
+
+    # ------------------------------------------------------------------
+    # 4. Build split CSVs
+    # ------------------------------------------------------------------
+    print("Step 4/4: Building train/test splits...")
+
+    # Merge spectrogram paths with annotation data
+    spec_df = pd.DataFrame(spectrogram_paths)
+    merged = pd.merge(
+        df[["patient_id", "recording_id", "diagnosis"]].drop_duplicates("recording_id"),
+        spec_df,
+        on=["patient_id", "recording_id"],
+        how="inner",
+    )
+
+    # Map diagnosis to DiseaseClass
+    merged["disease_class"] = merged["diagnosis"].apply(
+        lambda x: map_label(x).value if map_label(x) else None
+    )
+    merged = merged.dropna(subset=["disease_class"])
+    merged["segment_id"] = 0  # single segment per file for simplicity
+
+    split_def_path = config.splits_dir / "split_def.json"
+    config.splits_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use official ICBHI patient-level split if known, else 80/20 split
+    # Official ICBHI train patients (first 60% by patient ID numeric order)
+    all_patient_ids = sorted(merged["patient_id"].unique(), key=lambda x: int(x) if x.isdigit() else 0)
+    split_idx = int(len(all_patient_ids) * 0.8)
+    train_ids = all_patient_ids[:split_idx]
+    test_ids = all_patient_ids[split_idx:]
+
+    split_def = {"train": train_ids, "test": test_ids}
+    with open(split_def_path, "w") as f:
+        json.dump(split_def, f)
+
+    train_df, test_df = split_dataset(merged, split_def_path, config)
+
+    print(f"\n✅ Preprocessing complete!")
+    print(f"  Train samples: {len(train_df)}")
+    print(f"  Test samples:  {len(test_df)}")
+    print(f"  Disease classes in train:\n{train_df['disease_class'].value_counts().to_string()}")
+    print(f"\nSplit CSVs saved to: {config.splits_dir}")

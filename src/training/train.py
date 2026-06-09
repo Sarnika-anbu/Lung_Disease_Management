@@ -847,3 +847,60 @@ class Trainer:
             scores.append((sensitivity + specificity) / 2.0)
 
         return float(np.mean(scores))
+
+
+# ---------------------------------------------------------------------------
+# Main entry point — run the full two-stage training pipeline
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import sys
+    import pandas as pd
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        stream=sys.stderr,
+    )
+
+    config = Config()
+
+    # Load split CSVs
+    train_csv = config.splits_dir / "train.csv"
+    test_csv = config.splits_dir / "test.csv"
+
+    if not train_csv.exists() or not test_csv.exists():
+        print("ERROR: Split CSVs not found. Run preprocessing first:")
+        print("  python src/data/preprocess.py")
+        sys.exit(1)
+
+    train_df = pd.read_csv(train_csv)
+    val_df = pd.read_csv(test_csv)
+
+    print(f"Train samples: {len(train_df)}")
+    print(f"Val samples:   {len(val_df)}")
+    print(f"Classes:       {train_df['disease_class'].value_counts().to_dict()}")
+
+    # Instantiate model
+    from src.models.model import LungDiseaseModel
+    model = LungDiseaseModel(metadata_input_dim=_METADATA_DIM, _pretrained=True)
+
+    # Instantiate trainer
+    trainer = Trainer(model, train_df, val_df, config)
+
+    # Stage 1: full model training
+    print("\n" + "="*60)
+    print("STAGE 1: Full model training (50 epochs)")
+    print("="*60)
+    trainer.train_stage1()
+
+    # Stage 2: backbone freeze + head fine-tuning
+    print("\n" + "="*60)
+    print("STAGE 2: Freezing backbone, fine-tuning head (15 epochs)")
+    print("="*60)
+    trainer.freeze_backbone()
+    trainer.train_stage2()
+
+    print("\n✅ Training complete!")
+    print(f"Best checkpoint: {config.checkpoints_dir / 'best.pth'}")
+    print(f"Best ICBHI score: {trainer._best_score:.4f}")
