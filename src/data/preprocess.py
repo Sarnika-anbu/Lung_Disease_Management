@@ -696,17 +696,49 @@ if __name__ == "__main__":
     print("Step 1/4: Parsing ICBHI annotations...")
     icbhi_dir = config.raw_icbhi_dir
 
-    # Try to find the annotation directory (may be nested after extraction)
-    annotation_dirs = list(icbhi_dir.rglob("ICBHI_diagnosis.txt"))
-    if not annotation_dirs:
+    # ICBHI dataset extracts into a nested structure.
+    # Try multiple known locations for ICBHI_diagnosis.txt
+    candidate_names = ["ICBHI_diagnosis.txt", "demographic_info.txt"]
+    ann_dir = None
+
+    for name in candidate_names:
+        found = list(icbhi_dir.rglob(name))
+        if found:
+            ann_dir = found[0].parent
+            logger.info("Using diagnosis file: %s", found[0])
+            break
+
+    # Also search for the audio_and_txt_files directory which contains annotation .txt files
+    audio_txt_dirs = list(icbhi_dir.rglob("audio_and_txt_files"))
+    if audio_txt_dirs:
+        audio_txt_dir = audio_txt_dirs[0]
+        # Use parent of audio_and_txt_files for diagnosis file lookup if not found above
+        if ann_dir is None:
+            ann_dir = audio_txt_dir.parent
+    else:
+        audio_txt_dir = ann_dir
+
+    if ann_dir is None:
         print(f"ERROR: ICBHI_diagnosis.txt not found under {icbhi_dir}")
         print("Make sure you have downloaded and extracted the ICBHI dataset.")
         sys.exit(1)
 
-    ann_dir = annotation_dirs[0].parent
-    print(f"  Found annotations in: {ann_dir}")
+    print(f"  Found data directory: {ann_dir}")
 
-    df = parse_icbhi_annotations(ann_dir)
+    # Parse annotations from the audio_and_txt_files directory
+    parse_dir = audio_txt_dir if audio_txt_dir else ann_dir
+
+    # Copy diagnosis file into parse_dir if it's not already there
+    for name in candidate_names:
+        src_diag = ann_dir / name
+        dst_diag = parse_dir / "ICBHI_diagnosis.txt"
+        if src_diag.exists() and not dst_diag.exists():
+            import shutil as _shutil
+            _shutil.copy(str(src_diag), str(dst_diag))
+            print(f"  Copied {name} → {dst_diag}")
+            break
+
+    df = parse_icbhi_annotations(parse_dir)
     print(f"  Parsed {len(df)} segments from {df['patient_id'].nunique()} patients")
 
     if df.empty:
@@ -758,8 +790,8 @@ if __name__ == "__main__":
     spectrogram_paths = []
     skipped = 0
 
-    # Find all WAV files in the ICBHI directory
-    wav_files = list(ann_dir.rglob("*.wav"))
+    # Find all WAV files in the audio_and_txt_files directory
+    wav_files = list(parse_dir.rglob("*.wav"))
     if not wav_files:
         wav_files = list(icbhi_dir.rglob("*.wav"))
 
