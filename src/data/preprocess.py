@@ -212,27 +212,43 @@ def _load_diagnosis_map(diagnosis_path: Path) -> dict[str, str]:
                     diagnosis_path, sep=r"\s+", engine="python"
                 )
 
-            # Normalise column names to lowercase
+            # Normalise column names to lowercase and strip whitespace
             df_diag.columns = [c.strip().lower() for c in df_diag.columns]
 
-            # Find patient_id and diagnosis columns
+            # Find patient_id column
             pid_col = next(
-                (c for c in df_diag.columns if "patient" in c or c == "id"),
+                (c for c in df_diag.columns if c in ("patient_id", "patientid", "id", "patient")),
                 df_diag.columns[0],
             )
+
+            # Find diagnosis column — must contain "diagnosis" or "disease"
+            # Explicitly avoid numeric columns (age, bmi, weight, height)
             diag_col = next(
-                (c for c in df_diag.columns if "diagnosis" in c or "disease" in c),
+                (c for c in df_diag.columns
+                 if any(kw in c for kw in ("diagnosis", "disease", "label", "condition"))),
                 None,
             )
 
+            # If no obvious diagnosis column, use the last non-numeric column
             if diag_col is None:
-                # Last column is often diagnosis
+                for c in reversed(df_diag.columns):
+                    if c == pid_col:
+                        continue
+                    # Check if values are strings (not all numeric)
+                    sample = df_diag[c].dropna().astype(str)
+                    if sample.str.match(r"^[A-Za-z]").any():
+                        diag_col = c
+                        break
+
+            if diag_col is None:
                 diag_col = df_diag.columns[-1]
+
+            logger.info("Using patient_id column='%s', diagnosis column='%s'", pid_col, diag_col)
 
             for _, row in df_diag.iterrows():
                 pid = str(row[pid_col]).strip()
                 diag = str(row[diag_col]).strip()
-                if pid and diag and diag.lower() != "nan":
+                if pid and diag and diag.lower() not in ("nan", "none", ""):
                     diagnosis_map[pid] = diag
         else:
             # Simple 2-column format: patient_id  diagnosis
