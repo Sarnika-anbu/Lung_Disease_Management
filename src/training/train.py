@@ -854,6 +854,7 @@ class Trainer:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import logging
     import sys
     import pandas as pd
 
